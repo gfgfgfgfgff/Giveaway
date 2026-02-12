@@ -3,10 +3,13 @@ import discord
 from discord.ext import commands
 from discord import app_commands
 import asyncio
-from datetime import datetime, timedelta, UTC
+from datetime import datetime, timedelta, timezone
 import random
 
 TOKEN = os.getenv('TOKEN')
+
+# 🇫🇷 Fuseau horaire France (UTC+1)
+FRANCE_TZ = timezone(timedelta(hours=1))
 
 class GiveawayBot(commands.Bot):
     def __init__(self):
@@ -40,7 +43,7 @@ class GiveawayBot(commands.Bot):
             activity=discord.Game(
                 name="/akusa"
             ),
-            status=discord.Status.dnd  # 🔴 Ne pas déranger
+            status=discord.Status.dnd
         )
         
         print(f"📊 Présence : 🔴 Ne pas déranger - Joue à /akusa")
@@ -59,11 +62,18 @@ class GiveawayView(discord.ui.View):
         self.participants = set()
         self.message = None
 
-    @discord.ui.button(label="participer", style=discord.ButtonStyle.gray)
-    async def participate_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        # ✅ Ajout du bouton avec l'emoji dans __init__
+        button = discord.ui.Button(
+            style=discord.ButtonStyle.gray,
+            label="participer",
+            emoji=self.emoji,  # L'emoji est défini ici
+            custom_id=f"giveaway_{message_id}" if message_id else None
+        )
+        button.callback = self.participate_button
+        self.add_item(button)
+
+    async def participate_button(self, interaction: discord.Interaction):
         """Bouton de participation - toggle participation"""
-        
-        button.emoji = self.emoji
         
         if interaction.user.bot:
             await interaction.response.send_message("Les bots ne peuvent pas participer !", ephemeral=True)
@@ -80,7 +90,9 @@ class GiveawayView(discord.ui.View):
 
         if self.message:
             embed = self.message.embeds[0]
-            embed.set_footer(text=f"Participants: {len(self.participants)} • Fin: {self.end_time.strftime('%d/%m/%Y %H:%M:%S')}")
+            # 🇫🇷 Heure France (UTC+1)
+            france_time = self.end_time.astimezone(FRANCE_TZ)
+            embed.set_footer(text=f"Participants: {len(self.participants)} • Fin: {france_time.strftime('%d/%m/%Y %H:%M:%S')}")
             await self.message.edit(embed=embed)
 
 class GiveawayCog(commands.Cog):
@@ -92,7 +104,7 @@ class GiveawayCog(commands.Cog):
         await self.bot.wait_until_ready()
         while not self.bot.is_closed():
             try:
-                current_time = datetime.now(UTC)
+                current_time = datetime.now(FRANCE_TZ)  # 🇫🇷 Heure France
                 expired = []
                 
                 for message_id, data in self.bot.active_giveaways.items():
@@ -150,7 +162,8 @@ class GiveawayCog(commands.Cog):
                 await interaction.followup.send(embed=embed_error, ephemeral=True)
                 return
 
-            end_time = datetime.now(UTC) + duration
+            # 🇫🇷 Heure de fin en France (UTC+1)
+            end_time = datetime.now(FRANCE_TZ) + duration
 
             embed = discord.Embed(
                 title="**Giveaway**",
@@ -159,6 +172,7 @@ class GiveawayCog(commands.Cog):
             )
             
             embed.add_field(name="\u200b", value="───────────────────", inline=False)
+            # 🇫🇷 Affichage heure France
             embed.set_footer(text=f"Participants: 0 • Fin: {end_time.strftime('%d/%m/%Y %H:%M:%S')}")
 
             view = GiveawayView(emoji, end_time, nombre_de_gagnants, gain, salon.id)
