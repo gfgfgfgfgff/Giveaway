@@ -33,12 +33,16 @@ class GiveawayBot(commands.Bot):
             print(f"❌ Erreur synchronisation: {e}")
 
     async def on_ready(self):
-        print(f"✅ {self.user} est connecté !")
-        await self.change_presence(
-            activity=discord.Activity(
-                type=discord.ActivityType.watching,
-                name="/giveaway | " + str(len(self.guilds)) + " serveurs"
-            )
+    print(f"✅ {self.user} est connecté !")
+    
+    await self.change_presence(
+        activity=discord.Game(
+            name="/akusa"
+        ),
+        status=discord.Status.dnd  # 🔴 Ne pas déranger
+    )
+    
+    print(f"📊 Présence : 🔴 Ne pas déranger - Joue à /akusa")
         )
 
 class GiveawayView(discord.ui.View):
