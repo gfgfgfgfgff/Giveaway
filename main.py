@@ -5,6 +5,7 @@ from discord import app_commands
 import asyncio
 from datetime import datetime, timedelta, timezone
 import random
+from typing import Literal
 
 TOKEN = os.getenv('TOKEN')
 
@@ -52,7 +53,7 @@ class GiveawayBot(commands.Bot):
 class GiveawayView(discord.ui.View):
     """View pour le bouton de participation"""
     
-    def __init__(self, emoji: str, end_time: datetime, winners: int, prize: str, channel_id: int, message_id: int = None, conditions_role: discord.Role = None):
+    def __init__(self, emoji: str, end_time: datetime, winners: int, prize: str, channel_id: int, message_id: int = None):
         super().__init__(timeout=None)
         self.emoji = emoji
         self.end_time = end_time
@@ -60,7 +61,6 @@ class GiveawayView(discord.ui.View):
         self.prize = prize
         self.channel_id = channel_id
         self.message_id = message_id
-        self.conditions_role = conditions_role
         self.participants = set()
         self.message = None
 
@@ -81,13 +81,7 @@ class GiveawayView(discord.ui.View):
             await interaction.response.send_message("Les bots ne peuvent pas participer !", ephemeral=True)
             return
 
-        # Vérification des conditions si un rôle est spécifié
-        if self.conditions_role and self.conditions_role not in interaction.user.roles:
-            await interaction.response.send_message(
-                f"Vous devez avoir le rôle {self.conditions_role.mention} pour participer à ce giveaway !",
-                ephemeral=True
-            )
-            return
+        # ✅ PLUS AUCUNE VÉRIFICATION DE RÔLE - Supprimée selon demande
 
         user_id = interaction.user.id
         
@@ -223,11 +217,32 @@ class GiveawayCog(commands.Cog):
             await interaction.followup.send(embed=embed_error, ephemeral=True)
 
     @app_commands.command(name="pgiveaway", description="Lance un giveaway avec conditions prédéfinies")
+    @app_commands.choices(gain=[
+        app_commands.Choice(name="Nitro boost", value="nitro"),
+        app_commands.Choice(name="Décoration", value="deco")
+    ])
+    @app_commands.choices(nombre=[
+        app_commands.Choice(name="1", value=1),
+        app_commands.Choice(name="2", value=2),
+        app_commands.Choice(name="3", value=3),
+        app_commands.Choice(name="4", value=4),
+        app_commands.Choice(name="5", value=5),
+        app_commands.Choice(name="6", value=6),
+        app_commands.Choice(name="7", value=7),
+        app_commands.Choice(name="8", value=8),
+        app_commands.Choice(name="9", value=9),
+        app_commands.Choice(name="10", value=10),
+        app_commands.Choice(name="11", value=11),
+        app_commands.Choice(name="12", value=12),
+        app_commands.Choice(name="13", value=13),
+        app_commands.Choice(name="14", value=14),
+        app_commands.Choice(name="15", value=15),
+    ])
     async def pgiveaway(
         self, 
         interaction: discord.Interaction, 
-        gain: str,
-        nombre: app_commands.Range[int, 1, 15],
+        gain: app_commands.Choice[str],
+        nombre: app_commands.Choice[int],
         temps: str,
         salon: discord.TextChannel,
         emoji: str = "🎉"
@@ -265,12 +280,16 @@ class GiveawayCog(commands.Cog):
                 await interaction.followup.send(embed=embed_error, ephemeral=True)
                 return
 
+            # Déterminer le libellé du gain
+            gain_label = "NITRO BOOST" if gain.value == "nitro" else "DECORATION"
+            gain_display = "Nitro boost" if gain.value == "nitro" else "Décoration"
+            
             # 🇫🇷 Heure de fin en France (UTC+1)
             end_time = datetime.now(FRANCE_TZ) + duration
 
             embed = discord.Embed(
                 title="**Giveaway**",
-                description=f"```\nGain : {gain}\n\nDurée : {temps}\n\nNombre de gagnants : {nombre}\n\n```",
+                description=f"```\nGain : {gain_display}\n\nDurée : {temps}\n\nNombre de gagnants : {nombre.value}\n\n```",
                 color=0xFFFFFF
             )
             
@@ -278,45 +297,62 @@ class GiveawayCog(commands.Cog):
             # 🇫🇷 Affichage heure France
             embed.set_footer(text=f"Participants: 0 • Fin: {end_time.strftime('%d/%m/%Y %H:%M:%S')}")
 
-            # Rôle de condition (à modifier selon votre serveur)
-            conditions_role = interaction.guild.get_role(1466923187534303444)
-            
-            view = GiveawayView(emoji, end_time, nombre, gain, salon.id, conditions_role=conditions_role)
+            view = GiveawayView(emoji, end_time, nombre.value, gain_display, salon.id)
             
             # Envoi de l'embed principal
             giveaway_message = await salon.send(embed=embed, view=view)
             view.message = giveaway_message
             view.message_id = giveaway_message.id
             
-            # Message des conditions spécifiques pour Nitro Boost
-            if gain.lower() == "nitro boost" and nombre == 1:
-                conditions_message = f"""# NITRO BOOST X1
-Condition : <@&1466923187534303444>
+            # Déterminer le message de conditions selon le gain et le nombre
+            conditions_message = ""
+            role_id = "<@&1466923187534303444>"
+            
+            # Construction du message de base
+            if nombre.value == 1 or nombre.value == 2:
+                # X1 et X2 : mention rôle seulement
+                condition_vocale = "`-` Etre en vocal **du debut a la fin**"
+                mention = role_id
+                here = ""
+            elif 3 <= nombre.value <= 10:
+                # X3 à X10 : mention rôle + @here + condition "demute"
+                condition_vocale = "`-` Etre en vocal **du debut a la fin** en etant **demute**"
+                mention = role_id
+                here = "@here"
+            else:
+                # X11 à X15 : mention rôle + @here + condition "demute et avec d'autres membres"
+                condition_vocale = "`-` Etre en vocal **du debut a la fin** en etant **demute** **etre avec d'autres membres**"
+                mention = role_id
+                here = "@here"
+            
+            # Construction du message complet
+            conditions_message = f"""# {gain_label} X{nombre.value}
+Condition : {mention} {here}
 
-`-` Etre en vocal **du debut a la fin** 
+{condition_vocale}
 
 `-` Avoir `/akusa` **en status** du __debut__ a la __fin__
 
 
 __Sa ne sert a rien de se connecter a la fin, on vois tout grace au logs__"""
-                
-                await salon.send(conditions_message)
+            
+            # Envoi du message de conditions
+            await salon.send(conditions_message)
             
             self.bot.active_giveaways[giveaway_message.id] = {
                 "end_time": end_time,
-                "winners": nombre,
-                "prize": gain,
+                "winners": nombre.value,
+                "prize": gain_display,
                 "emoji": emoji,
                 "channel_id": salon.id,
                 "message_id": giveaway_message.id,
                 "host_id": interaction.user.id,
                 "view": view,
-                "participants": view.participants,
-                "conditions_role": conditions_role
+                "participants": view.participants
             }
 
             embed_confirm = discord.Embed(
-                description=f"Le giveaway **{gain}** est lancé dans le salon {salon.mention} avec conditions",
+                description=f"Le giveaway **{gain_display}** est lancé dans le salon {salon.mention} avec conditions",
                 color=0x00FF00
             )
             await interaction.followup.send(embed=embed_confirm, ephemeral=True)
