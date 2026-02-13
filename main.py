@@ -18,6 +18,7 @@ class GiveawayBot(commands.Bot):
         intents.reactions = True
         intents.members = True
         intents.guilds = True
+        intents.voice_states = True  # Pour vérifier les salons vocaux
         
         super().__init__(
             command_prefix="!",
@@ -51,7 +52,7 @@ class GiveawayBot(commands.Bot):
 class GiveawayView(discord.ui.View):
     """View pour le bouton de participation"""
     
-    def __init__(self, emoji: str, end_time: datetime, winners: int, prize: str, channel_id: int, message_id: int = None):
+    def __init__(self, emoji: str, end_time: datetime, winners: int, prize: str, channel_id: int, message_id: int = None, conditions_role: discord.Role = None):
         super().__init__(timeout=None)
         self.emoji = emoji
         self.end_time = end_time
@@ -59,6 +60,7 @@ class GiveawayView(discord.ui.View):
         self.prize = prize
         self.channel_id = channel_id
         self.message_id = message_id
+        self.conditions_role = conditions_role
         self.participants = set()
         self.message = None
 
@@ -66,7 +68,7 @@ class GiveawayView(discord.ui.View):
         button = discord.ui.Button(
             style=discord.ButtonStyle.gray,
             label="participer",
-            emoji=self.emoji,  # L'emoji est défini ici
+            emoji=self.emoji,
             custom_id=f"giveaway_{message_id}" if message_id else None
         )
         button.callback = self.participate_button
@@ -77,6 +79,14 @@ class GiveawayView(discord.ui.View):
         
         if interaction.user.bot:
             await interaction.response.send_message("Les bots ne peuvent pas participer !", ephemeral=True)
+            return
+
+        # Vérification des conditions si un rôle est spécifié
+        if self.conditions_role and self.conditions_role not in interaction.user.roles:
+            await interaction.response.send_message(
+                f"Vous devez avoir le rôle {self.conditions_role.mention} pour participer à ce giveaway !",
+                ephemeral=True
+            )
             return
 
         user_id = interaction.user.id
@@ -195,6 +205,118 @@ class GiveawayCog(commands.Cog):
 
             embed_confirm = discord.Embed(
                 description=f"Le giveaway **{gain}** est lancé dans le salon {salon.mention}",
+                color=0x00FF00
+            )
+            await interaction.followup.send(embed=embed_confirm, ephemeral=True)
+
+        except ValueError:
+            embed_error = discord.Embed(
+                description="Format de temps invalide. Exemple: `10s`, `5m`, `2h`, `1j`",
+                color=0xFF0000
+            )
+            await interaction.followup.send(embed=embed_error, ephemeral=True)
+        except Exception as e:
+            embed_error = discord.Embed(
+                description=f"Une erreur est survenue: {str(e)}",
+                color=0xFF0000
+            )
+            await interaction.followup.send(embed=embed_error, ephemeral=True)
+
+    @app_commands.command(name="pgiveaway", description="Lance un giveaway avec conditions prédéfinies")
+    async def pgiveaway(
+        self, 
+        interaction: discord.Interaction, 
+        gain: str,
+        nombre: app_commands.Range[int, 1, 15],
+        temps: str,
+        salon: discord.TextChannel,
+        emoji: str = "🎉"
+    ):
+        """Commande slash pour créer un giveaway personnalisé avec conditions"""
+        
+        if (interaction.user.id not in self.bot.authorized_users and 
+            not interaction.user.guild_permissions.administrator):
+            embed_error = discord.Embed(
+                description="Vous n'êtes pas autorisé à utiliser cette commande.",
+                color=0xFF0000
+            )
+            await interaction.response.send_message(embed=embed_error, ephemeral=True)
+            return
+
+        await interaction.response.defer(ephemeral=True)
+
+        try:
+            time_unit = temps[-1].lower()
+            time_value = int(temps[:-1])
+            
+            if time_unit == 's':
+                duration = timedelta(seconds=time_value)
+            elif time_unit == 'm':
+                duration = timedelta(minutes=time_value)
+            elif time_unit == 'h':
+                duration = timedelta(hours=time_value)
+            elif time_unit == 'j':
+                duration = timedelta(days=time_value)
+            else:
+                embed_error = discord.Embed(
+                    description="Format de temps invalide. Utilisez `s`, `m`, `h` ou `j`",
+                    color=0xFF0000
+                )
+                await interaction.followup.send(embed=embed_error, ephemeral=True)
+                return
+
+            # 🇫🇷 Heure de fin en France (UTC+1)
+            end_time = datetime.now(FRANCE_TZ) + duration
+
+            embed = discord.Embed(
+                title="**Giveaway**",
+                description=f"```\nGain : {gain}\n\nDurée : {temps}\n\nNombre de gagnants : {nombre}\n\n```",
+                color=0xFFFFFF
+            )
+            
+            embed.add_field(name="\u200b", value="───────────────────", inline=False)
+            # 🇫🇷 Affichage heure France
+            embed.set_footer(text=f"Participants: 0 • Fin: {end_time.strftime('%d/%m/%Y %H:%M:%S')}")
+
+            # Rôle de condition (à modifier selon votre serveur)
+            conditions_role = interaction.guild.get_role(1466923187534303444)
+            
+            view = GiveawayView(emoji, end_time, nombre, gain, salon.id, conditions_role=conditions_role)
+            
+            # Envoi de l'embed principal
+            giveaway_message = await salon.send(embed=embed, view=view)
+            view.message = giveaway_message
+            view.message_id = giveaway_message.id
+            
+            # Message des conditions spécifiques pour Nitro Boost
+            if gain.lower() == "nitro boost" and nombre == 1:
+                conditions_message = f"""# NITRO BOOST X1
+Condition : <@&1466923187534303444>
+
+`-` Etre en vocal **du debut a la fin** 
+
+`-` Avoir `/akusa` **en status** du __debut__ a la __fin__
+
+
+__Sa ne sert a rien de se connecter a la fin, on vois tout grace au logs__"""
+                
+                await salon.send(conditions_message)
+            
+            self.bot.active_giveaways[giveaway_message.id] = {
+                "end_time": end_time,
+                "winners": nombre,
+                "prize": gain,
+                "emoji": emoji,
+                "channel_id": salon.id,
+                "message_id": giveaway_message.id,
+                "host_id": interaction.user.id,
+                "view": view,
+                "participants": view.participants,
+                "conditions_role": conditions_role
+            }
+
+            embed_confirm = discord.Embed(
+                description=f"Le giveaway **{gain}** est lancé dans le salon {salon.mention} avec conditions",
                 color=0x00FF00
             )
             await interaction.followup.send(embed=embed_confirm, ephemeral=True)
