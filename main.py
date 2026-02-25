@@ -20,6 +20,7 @@ class GiveawayBot(commands.Bot):
         intents.members = True
         intents.guilds = True
         intents.voice_states = True  # Pour vérifier les salons vocaux
+        intents.presences = True  # Pour vérifier les statuts
         
         super().__init__(
             command_prefix="!",
@@ -28,6 +29,7 @@ class GiveawayBot(commands.Bot):
         
         self.active_giveaways = {}
         self.authorized_users = set()
+        self.participants_data = {}  # Stocke les données des participants (vocal, statut, etc.)
 
     async def setup_hook(self):
         await self.add_cog(GiveawayCog(self))
@@ -53,7 +55,7 @@ class GiveawayBot(commands.Bot):
 class GiveawayView(discord.ui.View):
     """View pour le bouton de participation"""
     
-    def __init__(self, emoji: str, end_time: datetime, winners: int, prize: str, channel_id: int, message_id: int = None):
+    def __init__(self, emoji: str, end_time: datetime, winners: int, prize: str, channel_id: int, message_id: int = None, conditions_type: str = None):
         super().__init__(timeout=None)
         self.emoji = emoji
         self.end_time = end_time
@@ -61,10 +63,11 @@ class GiveawayView(discord.ui.View):
         self.prize = prize
         self.channel_id = channel_id
         self.message_id = message_id
+        self.conditions_type = conditions_type  # "nitro" ou "deco" ou None
         self.participants = set()
         self.message = None
 
-        # ✅ Ajout du bouton avec l'emoji dans __init__
+        # ✅ Ajout du bouton avec l'emoji
         button = discord.ui.Button(
             style=discord.ButtonStyle.gray,
             label="participer",
@@ -80,8 +83,6 @@ class GiveawayView(discord.ui.View):
         if interaction.user.bot:
             await interaction.response.send_message("Les bots ne peuvent pas participer !", ephemeral=True)
             return
-
-        # ✅ PLUS AUCUNE VÉRIFICATION DE RÔLE - Supprimée selon demande
 
         user_id = interaction.user.id
         
@@ -194,7 +195,8 @@ class GiveawayCog(commands.Cog):
                 "message_id": giveaway_message.id,
                 "host_id": interaction.user.id,
                 "view": view,
-                "participants": view.participants
+                "participants": view.participants,
+                "conditions_type": None
             }
 
             embed_confirm = discord.Embed(
@@ -297,7 +299,7 @@ class GiveawayCog(commands.Cog):
             # 🇫🇷 Affichage heure France
             embed.set_footer(text=f"Participants: 0 • Fin: {end_time.strftime('%d/%m/%Y %H:%M:%S')}")
 
-            view = GiveawayView(emoji, end_time, nombre.value, gain_display, salon.id)
+            view = GiveawayView(emoji, end_time, nombre.value, gain_display, salon.id, conditions_type=gain.value)
             
             # Envoi de l'embed principal
             giveaway_message = await salon.send(embed=embed, view=view)
@@ -348,7 +350,9 @@ __Sa ne sert a rien de se connecter a la fin, on vois tout grace au logs__"""
                 "message_id": giveaway_message.id,
                 "host_id": interaction.user.id,
                 "view": view,
-                "participants": view.participants
+                "participants": view.participants,
+                "conditions_type": gain.value,
+                "conditions_level": nombre.value
             }
 
             embed_confirm = discord.Embed(
@@ -387,7 +391,7 @@ __Sa ne sert a rien de se connecter a la fin, on vois tout grace au logs__"""
             message_id = int(id_du_message)
         except ValueError:
             embed_error = discord.Embed(
-                description="Id du message incroyable",
+                description="Id du message invalide",
                 color=0xFF0000
             )
             await interaction.followup.send(embed=embed_error, ephemeral=True)
@@ -452,6 +456,36 @@ __Sa ne sert a rien de se connecter a la fin, on vois tout grace au logs__"""
         except Exception as e:
             print(f"Erreur end_giveaway: {e}")
 
+    async def check_conditions(self, user, conditions_type, conditions_level):
+        """Vérifie si un utilisateur respecte les conditions"""
+        
+        # Vérifier le statut /akusa
+        has_akusa = False
+        for activity in user.activities:
+            if activity.type == discord.ActivityType.custom and activity.name and "/akusa" in activity.name:
+                has_akusa = True
+                break
+        
+        if not has_akusa:
+            return False, "pas le statut /akusa"
+        
+        # Vérifier la présence en vocal
+        if not user.voice or not user.voice.channel:
+            return False, "pas en vocal"
+        
+        # Vérifier les conditions selon le niveau
+        if conditions_level >= 3:
+            # Être démuté
+            if user.voice.self_mute or user.voice.mute:
+                return False, "muet"
+        
+        if conditions_level >= 11:
+            # Être avec d'autres membres (au moins 1 autre personne)
+            if len(user.voice.channel.members) < 2:
+                return False, "seul dans le vocal"
+        
+        return True, "conditions respectées"
+
     async def select_winners(self, message: discord.Message, interaction: discord.Interaction = None, reroll: bool = False):
         message_id = message.id
         
@@ -477,12 +511,18 @@ __Sa ne sert a rien de se connecter a la fin, on vois tout grace au logs__"""
             data = {
                 "winners": winners_count,
                 "prize": gain,
-                "emoji": emoji
+                "emoji": emoji,
+                "host_id": None,
+                "conditions_type": None,
+                "conditions_level": None
             }
 
         winners_count = data["winners"]
         prize = data["prize"]
         emoji = data.get("emoji", "🎉")
+        host_id = data.get("host_id")
+        conditions_type = data.get("conditions_type")
+        conditions_level = data.get("conditions_level")
 
         participants = []
         
@@ -502,42 +542,114 @@ __Sa ne sert a rien de se connecter a la fin, on vois tout grace au logs__"""
                     break
 
         if len(participants) < winners_count:
-            winner_text = "Pas assez de participants"
-            winners = []
-        else:
-            winners = random.sample(participants, min(winners_count, len(participants)))
-            winner_text = " ".join([winner.mention for winner in winners])
+            # Cas 4 : Pas assez de participants
+            ping_message = f"Pas assez de participants pour le giveaway **{prize}**."
+            
+            # Modifier l'embed
+            new_embed = discord.Embed(
+                title=f"**Giveaway ({prize}) terminé**",
+                color=0xFFFFFF
+            )
+            new_embed.add_field(name="**Résultat**", value="Pas assez de participants", inline=False)
+            new_embed.set_footer(text=f"Total participants: {len(participants)} • Giveaway terminé")
+            
+            await message.edit(embed=new_embed, view=None)
+            await message.reply(ping_message)
+            
+            # Mentionner l'hôte et supprimer après 2 secondes
+            if host_id:
+                host = self.bot.get_user(host_id)
+                if host:
+                    host_mention = await message.channel.send(f"{host.mention}")
+                    await asyncio.sleep(2)
+                    await host_mention.delete()
+            
+            if not reroll and message_id in self.bot.active_giveaways:
+                del self.bot.active_giveaways[message_id]
+            return
 
-        # 🎯 MODIFICATION DE L'EMBED ORIGINAL
+        # Sélectionner les gagnants
+        selected_winners = random.sample(participants, min(winners_count, len(participants)))
+        
+        winners_valid = []
+        winners_invalid = []
+        
+        # Vérifier les conditions pour chaque gagnant (si c'est un pgiveaway)
+        if conditions_type:
+            for winner in selected_winners:
+                # Récupérer le membre (pas seulement l'user)
+                member = message.guild.get_member(winner.id)
+                if member:
+                    valid, reason = await self.check_conditions(member, conditions_type, conditions_level)
+                    if valid:
+                        winners_valid.append(winner)
+                    else:
+                        winners_invalid.append(winner)
+                else:
+                    winners_invalid.append(winner)
+        else:
+            # Pas de conditions, tous les gagnants sont valides
+            winners_valid = selected_winners
+
+        # Construire le message selon les cas
+        valid_mentions = " ".join([w.mention for w in winners_valid])
+        invalid_mentions = " ".join([w.mention for w in winners_invalid])
+        
+        if winners_valid and not winners_invalid:
+            # Cas 1 : Tous valides
+            ping_message = f"{valid_mentions} ont gagné **{prize}** !"
+        elif winners_valid and winners_invalid:
+            # Cas 2 : Certains valides, d'autres non
+            ping_message = f"{valid_mentions} ont gagné **{prize}**\n{invalid_mentions} ont gagné mais n'ont pas les conditions requises"
+        elif not winners_valid and winners_invalid:
+            # Cas 3 : Aucun valide
+            ping_message = f"{invalid_mentions} ont gagné **{prize}** mais il ont pas les condition requises"
+        else:
+            ping_message = f"Personne n'a gagné **{prize}**"
+
+        # Modifier l'embed original
         new_embed = discord.Embed(
             title=f"**Giveaway ({prize}) terminé**",
             color=0xFFFFFF
         )
         
-        if winners_count == 1:
-            new_embed.add_field(name="**Gagnant**", value=winner_text, inline=False)
-        else:
-            new_embed.add_field(name="**Gagnants**", value=winner_text, inline=False)
-        
+        result_text = f"**Gagnants valides :** {len(winners_valid)}\n**Gagnants non valides :** {len(winners_invalid)}"
+        new_embed.add_field(name="**Résultat**", value=result_text, inline=False)
         new_embed.set_footer(text=f"Total participants: {len(participants)} • Giveaway terminé")
 
-        # 🎯 SUPPRESSION DU BOUTON
-        try:
-            await message.edit(embed=new_embed, view=None)
-        except Exception as e:
-            print(f"Erreur modification embed: {e}")
-            await message.edit(embed=new_embed)
+        # Supprimer le bouton
+        await message.edit(embed=new_embed, view=None)
+        
+        # Envoyer le message de résultat
+        result_message = await message.reply(ping_message)
+        
+        # Message de vérification pour chaque gagnant valide
+        for winner in winners_valid:
+            member = message.guild.get_member(winner.id)
+            if member:
+                # Récupérer le statut personnalisé
+                status_text = "pas de statut"
+                for activity in member.activities:
+                    if activity.type == discord.ActivityType.custom:
+                        if activity.name:
+                            status_text = activity.name
+                        break
+                
+                # Vérifier si en vocal
+                if member.voice and member.voice.channel:
+                    check_message = f"{member.mention} est en vocal dans {member.voice.channel.mention} et il a `{status_text}` en status !"
+                else:
+                    check_message = f"{member.mention} n'est pas en vocal et il a `{status_text}` en status !"
+                
+                await message.channel.send(check_message)
 
-        # 🎯 MESSAGE DE PING
-        if winners:
-            if winners_count == 1:
-                ping_message = f"{winner_text} a gagné **{prize}** !"
-            else:
-                ping_message = f"{winner_text} ont gagné **{prize}** !"
-            
-            await message.reply(ping_message)
-        else:
-            await message.reply(f"Pas assez de participants pour le giveaway **{prize}**.")
+        # Mentionner l'hôte et supprimer après 2 secondes
+        if host_id:
+            host = self.bot.get_user(host_id)
+            if host:
+                host_mention = await message.channel.send(f"{host.mention}")
+                await asyncio.sleep(2)
+                await host_mention.delete()
 
         if not reroll and message_id in self.bot.active_giveaways:
             del self.bot.active_giveaways[message_id]
